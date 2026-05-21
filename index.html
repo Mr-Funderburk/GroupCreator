@@ -468,12 +468,34 @@
     transition: all 0.2s;
   }
 
+  .group-card.group-dragging {
+    opacity: 0.35;
+    transform: scale(0.97);
+  }
+
   .group-card.drag-over {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-glow);
   }
 
+  .group-card.group-reorder-over {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 2px rgba(245,200,66,0.25);
+    transform: translateY(-2px);
+  }
+
   .group-header {
+    padding: 12px 14px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: grab;
+  }
+
+  .group-header:active {
+    cursor: grabbing;
     padding: 12px 14px;
     background: var(--surface2);
     border-bottom: 1px solid var(--border);
@@ -2101,8 +2123,15 @@ function renderGroups() {
   container.innerHTML = cls.groups.map((g, gi) => {
     const color = groupColors[gi % groupColors.length];
     const members = g.members.map(id => cls.students.find(s => s.id === id)).filter(Boolean);
-    return `<div class="group-card fade-in" id="gc-${g.id}" ondragover="onDragOver(event, '${g.id}')" ondrop="onDrop(event, '${g.id}')" ondragleave="onDragLeave(event)">
-      <div class="group-header">
+    return `<div class="group-card fade-in" id="gc-${g.id}"
+      ondragover="onDragOver(event, '${g.id}')"
+      ondrop="onDrop(event, '${g.id}')"
+      ondragleave="onDragLeave(event)">
+      <div class="group-header"
+        draggable="true"
+        ondragstart="onGroupDragStart(event, '${g.id}')"
+        ondragend="onGroupDragEnd(event, '${g.id}')"
+        title="Drag to reorder groups">
         <div class="group-color-dot" style="background:${color}"></div>
         <div class="group-name-display" id="gn-${g.id}" ondblclick="startRenameGroup('${g.id}')">${escHtml(g.name)}</div>
         <div class="group-count">${members.length}</div>
@@ -2213,37 +2242,111 @@ function startRenameGroup(groupId) {
 }
 
 // ===== DRAG AND DROP =====
+// ── drag type tracker ──────────────────────────────────────────────────
+// 'student' drag and 'group' drag share the same drop targets (group cards)
+// so we use a flag to know which handler to fire on drop.
+let groupDragId = null; // id of the group card being dragged for reorder
+
+// ── STUDENT drag ───────────────────────────────────────────────────────
 function onDragStart(e, studentId, fromGroup) {
+  groupDragId = null; // make sure group drag is cleared
   dragState = { studentId, fromGroup };
   e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', `student:${studentId}`);
   setTimeout(() => { const el = document.getElementById(`gm-item-${studentId}`); if (el) el.classList.add('dragging'); }, 0);
 }
 
 function onDragEnd(e) {
   const el = document.getElementById(`gm-item-${dragState.studentId}`);
   if (el) el.classList.remove('dragging');
-  document.querySelectorAll('.group-card').forEach(el => el.classList.remove('drag-over'));
+  document.querySelectorAll('.group-card').forEach(el => {
+    el.classList.remove('drag-over');
+    el.classList.remove('group-reorder-over');
+  });
 }
 
+// ── GROUP drag ─────────────────────────────────────────────────────────
+function onGroupDragStart(e, groupId) {
+  groupDragId = groupId;
+  dragState = { studentId: null, fromGroup: null }; // clear student drag
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', `group:${groupId}`);
+  // Slight delay so the browser snapshot doesn't catch the faded state
+  setTimeout(() => { document.getElementById(`gc-${groupId}`)?.classList.add('group-dragging'); }, 0);
+}
+
+function onGroupDragEnd(e, groupId) {
+  document.getElementById(`gc-${groupId}`)?.classList.remove('group-dragging');
+  document.querySelectorAll('.group-card').forEach(el => {
+    el.classList.remove('drag-over');
+    el.classList.remove('group-reorder-over');
+  });
+  groupDragId = null;
+}
+
+// ── SHARED dragover / dragleave ────────────────────────────────────────
 function onDragOver(e, groupId) {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  document.querySelectorAll('.group-card').forEach(el => el.classList.remove('drag-over'));
-  document.getElementById(`gc-${groupId}`)?.classList.add('drag-over');
+  // Clear all highlights first
+  document.querySelectorAll('.group-card').forEach(el => {
+    el.classList.remove('drag-over');
+    el.classList.remove('group-reorder-over');
+  });
+  const card = document.getElementById(`gc-${groupId}`);
+  if (!card) return;
+  if (groupDragId && groupDragId !== groupId) {
+    // Group reorder — gold highlight
+    card.classList.add('group-reorder-over');
+  } else if (!groupDragId) {
+    // Student move — blue highlight
+    card.classList.add('drag-over');
+  }
 }
 
 function onDragLeave(e) {
   if (!e.currentTarget.contains(e.relatedTarget)) {
     e.currentTarget.classList.remove('drag-over');
+    e.currentTarget.classList.remove('group-reorder-over');
   }
 }
 
+// ── DROP ───────────────────────────────────────────────────────────────
 function onDrop(e, toGroupId) {
   e.preventDefault();
-  document.querySelectorAll('.group-card').forEach(el => el.classList.remove('drag-over'));
-  const { studentId, fromGroup } = dragState;
-  if (!studentId || fromGroup === toGroupId) return;
-  moveStudent(studentId, fromGroup, toGroupId, 'drag');
+  document.querySelectorAll('.group-card').forEach(el => {
+    el.classList.remove('drag-over');
+    el.classList.remove('group-reorder-over');
+  });
+
+  if (groupDragId) {
+    // Group reorder drop
+    if (groupDragId === toGroupId) return;
+    reorderGroup(groupDragId, toGroupId);
+    groupDragId = null;
+  } else {
+    // Student move drop
+    const { studentId, fromGroup } = dragState;
+    if (!studentId || fromGroup === toGroupId) return;
+    moveStudent(studentId, fromGroup, toGroupId, 'drag');
+  }
+}
+
+// ── REORDER GROUPS ─────────────────────────────────────────────────────
+function reorderGroup(draggedId, targetId) {
+  const cls = getActiveClass(); if (!cls) return;
+  const groups = cls.groups;
+  const fromIdx = groups.findIndex(g => g.id === draggedId);
+  const toIdx   = groups.findIndex(g => g.id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+
+  // Splice the dragged group out and insert it at the target position
+  const [moved] = groups.splice(fromIdx, 1);
+  groups.splice(toIdx, 0, moved);
+
+  saveState();
+  renderGroups();
+  toast(`"${moved.name}" moved to position ${toIdx + 1}.`);
 }
 
 function moveStudent(studentId, fromGroupId, toGroupId, source='manual') {
